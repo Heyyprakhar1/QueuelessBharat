@@ -94,11 +94,24 @@ class QueueSessionResponse(BaseModel):
 class WaitObservationCreate(BaseModel):
     """Payload to submit a point-in-time queue condition observation."""
 
-    people_ahead: int = Field(..., ge=0, description="Observed people waiting in line")
-    reported_wait_minutes: float | None = Field(
-        default=None, ge=0.0, description="Self-reported wait time in minutes"
+    people_ahead: int = Field(
+        ...,
+        ge=0,
+        le=5000,
+        description="Observed people waiting in line (up to 5,000)",
     )
-    active_counters: int = Field(..., ge=0, description="Observed active service windows")
+    reported_wait_minutes: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1440.0,
+        description="Self-reported wait time in minutes (up to 24 hours / 1,440 minutes)",
+    )
+    active_counters: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="Observed active service windows (up to 100)",
+    )
     source: ObservationSource = Field(
         default=ObservationSource.USER_REPORTED,
         description="Source channel (SYSTEM or USER_REPORTED)",

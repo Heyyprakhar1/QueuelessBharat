@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # ============================================================================
   # 1. Static Validation: Fast linting, formatting & type checks
@@ -323,6 +326,12 @@ jobs:
             --ignore-unfixed \
             --exit-code 0 \
             queless-backend:${{ steps.vars.outputs.short_sha }}
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            queless-backend:${{ steps.vars.outputs.short_sha }}
 
       - name: Run Trivy Vulnerability Scanner on Frontend Image
         run: |
@@ -332,4 +341,10 @@ jobs:
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --exit-code 0 \
+            queless-frontend:${{ steps.vars.outputs.short_sha }}
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
             queless-frontend:${{ steps.vars.outputs.short_sha }}

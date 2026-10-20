@@ -177,3 +177,42 @@ class TestRateLimiter:
 
         assert exc_info.value.status_code == 429
         assert "visit_plan" in exc_info.value.detail
+
+    async def test_observation_rate_limiter_blocks_excessive_submissions(self, monkeypatch):
+        """Verifies observation scope enforces configured rate limits."""
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        settings = get_settings()
+        monkeypatch.setattr(settings, "RATE_LIMIT_OBSERVATION_MAX", 2)
+        monkeypatch.setattr(settings, "RATE_LIMIT_OBSERVATION_WINDOW", 60)
+
+        limiter = SlidingWindowRateLimiter(max_requests=10, window_seconds=60, scope="observation")
+        req = make_mock_request()
+
+        await limiter(req)
+        await limiter(req)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await limiter(req)
+
+        assert exc_info.value.status_code == 429
+        assert "observation" in exc_info.value.detail
+
+    async def test_expired_keys_are_evicted_from_records(self, monkeypatch):
+        """Verifies cleanup_expired_keys removes stale client entries from records dict."""
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        limiter = SlidingWindowRateLimiter(max_requests=5, window_seconds=10, scope="test_evict")
+
+        # Manually populate records with old and fresh timestamps
+        limiter.records["test_evict:old_client_1"] = [100.0, 102.0]
+        limiter.records["test_evict:old_client_2"] = [104.0]
+        limiter.records["test_evict:active_client"] = [200.0]
+
+        # Monotonic time reference: 205.0 (cutoff = 205.0 - 10 = 195.0)
+        # old_client_1 and old_client_2 have timestamps < 195.0; active_client has 200.0 > 195.0
+        evicted = limiter.cleanup_expired_keys(now=205.0)
+
+        assert evicted == 2
+        assert "test_evict:old_client_1" not in limiter.records
+        assert "test_evict:old_client_2" not in limiter.records
+        assert "test_evict:active_client" in limiter.records
+        assert len(limiter.records) == 1

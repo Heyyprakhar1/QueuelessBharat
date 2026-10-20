@@ -2,6 +2,7 @@ import uuid
 
 import httpx
 
+from app.core.config import get_settings
 from app.domain.enums import UserRole
 
 
@@ -309,6 +310,72 @@ class TestQueueAPIIntegration:
             },
         )
         assert bad_obs.status_code == 422
+
+        # Boundary violation: people_ahead exceeds 5000 -> 422
+        bad_people = await client.post(
+            f"/api/v1/services/{svc['id']}/observations",
+            json={"people_ahead": 5001, "active_counters": 1},
+        )
+        assert bad_people.status_code == 422
+
+        # Boundary violation: active_counters exceeds 100 -> 422
+        bad_counters = await client.post(
+            f"/api/v1/services/{svc['id']}/observations",
+            json={"people_ahead": 10, "active_counters": 101},
+        )
+        assert bad_counters.status_code == 422
+
+        # Boundary violation: reported_wait_minutes exceeds 1440.0 -> 422
+        bad_wait = await client.post(
+            f"/api/v1/services/{svc['id']}/observations",
+            json={"people_ahead": 10, "active_counters": 2, "reported_wait_minutes": 1441.0},
+        )
+        assert bad_wait.status_code == 422
+
+        # Valid observation at boundary values -> 201
+        valid_boundary = await client.post(
+            f"/api/v1/services/{svc['id']}/observations",
+            json={"people_ahead": 5000, "active_counters": 100, "reported_wait_minutes": 1440.0},
+        )
+        assert valid_boundary.status_code == 201
+
+    async def test_observation_submission_rate_limiting(
+        self, client: httpx.AsyncClient, monkeypatch
+    ):
+        """Verifies observation submissions are subject to rate limiting (HTTP 429)."""
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        settings = get_settings()
+        monkeypatch.setattr(settings, "RATE_LIMIT_OBSERVATION_MAX", 2)
+        monkeypatch.setattr(settings, "RATE_LIMIT_OBSERVATION_WINDOW", 60)
+
+        loc = (
+            await client.post(
+                "/api/v1/locations",
+                json={
+                    "name": "Rate Limit Observation Facility",
+                    "category": "hospital",
+                    "address": "123 Limit St",
+                    "city": "Pune",
+                    "state": "Maharashtra",
+                },
+            )
+        ).json()
+        svc = (
+            await client.post(
+                "/api/v1/services",
+                json={"location_id": loc["id"], "name": "Limit OPD"},
+            )
+        ).json()
+
+        payload = {"people_ahead": 5, "active_counters": 2}
+        r1 = await client.post(f"/api/v1/services/{svc['id']}/observations", json=payload)
+        r2 = await client.post(f"/api/v1/services/{svc['id']}/observations", json=payload)
+        assert r1.status_code == 201
+        assert r2.status_code == 201
+
+        r3 = await client.post(f"/api/v1/services/{svc['id']}/observations", json=payload)
+        assert r3.status_code == 429
+        assert "Retry-After" in r3.headers
 
     async def test_not_found_handling(self, client: httpx.AsyncClient):
         """Verifies 404 for non-existent entities."""

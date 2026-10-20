@@ -1,19 +1,22 @@
 """In-memory sliding window rate limiter for abuse control and DoS deterrence.
 
-Architecture & Proxy Note:
---------------------------
-In a direct deployment (e.g. local development or bare container without a trusted reverse proxy),
-TRUST_PROXY_HEADERS is False by default. The rate limiter strictly identifies callers by their
-direct socket IP (request.client.host), discarding arbitrary or client-controlled headers such
-as X-Forwarded-For to prevent trivial rate limit evasion.
+Architecture & Instance Scope Note:
+-----------------------------------
+1. Local in-memory scope:
+   This SlidingWindowRateLimiter tracks sliding windows per Python application process.
+   It provides deterrence against brute-force abuse on single instances. In an autoscaled
+   multi-instance deployment (e.g. multiple AWS Elastic Beanstalk instances behind an ALB),
+   rate quotas are enforced independently per container rather than globally. Shared global
+   enforcement requires an external distributed cache (such as Amazon ElastiCache Redis).
 
-In an AWS production deployment behind an Application Load Balancer (ALB) or reverse proxy:
-1. The ALB/WAF terminates client TLS, sanitizes incoming headers, and appends the verified
-   client IP to X-Forwarded-For before forwarding traffic to ECS container tasks.
-2. The application must be configured with TRUST_PROXY_HEADERS=True and TRUSTED_PROXIES set to
-   the VPC subnet CIDR or ALB private IPs.
-3. When the direct socket IP matches a configured trusted proxy, the rate limiter parses the
-   forwarded client IP. If a request arrives from an untrusted socket, X-Forwarded-For is ignored.
+2. Trusted Proxy & Header Sanitization:
+   In direct development or container execution without a trusted reverse proxy,
+   TRUST_PROXY_HEADERS is False by default. The limiter identifies callers strictly by
+   direct socket IP (request.client.host), discarding arbitrary client-supplied headers.
+   When TRUST_PROXY_HEADERS is True and the direct connecting socket is within TRUSTED_PROXIES,
+   the candidate IP is extracted from X-Forwarded-For. To prevent client IP spoofing, the edge
+   load balancer or reverse proxy must sanitize or strip untrusted client-supplied X-Forwarded-For
+   headers before appending the verified downstream remote IP.
 """
 
 import asyncio
@@ -62,6 +65,28 @@ class SlidingWindowRateLimiter:
         self.scope = scope
         self.records: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
+        self._last_cleanup: float = 0.0
+
+    def cleanup_expired_keys(self, now: float | None = None) -> int:
+        """Removes client keys whose timestamps are all outside the sliding window.
+
+        Args:
+            now: Monotonic timestamp reference (defaults to time.monotonic()).
+
+        Returns:
+            int: Count of evicted expired client keys.
+        """
+        curr_time = now if now is not None else time.monotonic()
+        cutoff = curr_time - self.window_seconds
+        evicted = 0
+        for key in list(self.records.keys()):
+            active = [t for t in self.records[key] if t > cutoff]
+            if active:
+                self.records[key] = active
+            else:
+                del self.records[key]
+                evicted += 1
+        return evicted
 
     def _get_client_key(self, request: Request) -> str:
         settings = get_settings()
@@ -119,11 +144,19 @@ class SlidingWindowRateLimiter:
         elif self.scope == "visit_plan":
             max_requests = settings.RATE_LIMIT_VISIT_PLAN_MAX
             window_seconds = settings.RATE_LIMIT_VISIT_PLAN_WINDOW
+        elif self.scope == "observation":
+            max_requests = settings.RATE_LIMIT_OBSERVATION_MAX
+            window_seconds = settings.RATE_LIMIT_OBSERVATION_WINDOW
 
         now = time.monotonic()
         cutoff = now - window_seconds
 
         async with self._lock:
+            # Periodic opportunistic cleanup: prune all expired keys (at most once every 60s)
+            if now - self._last_cleanup >= 60.0:
+                self.cleanup_expired_keys(now)
+                self._last_cleanup = now
+
             # Purge timestamps older than the sliding window
             timestamps = [t for t in self.records[client_key] if t > cutoff]
             if len(timestamps) >= max_requests:
@@ -159,4 +192,7 @@ rate_limit_poll_session = SlidingWindowRateLimiter(
 )
 rate_limit_visit_plan = SlidingWindowRateLimiter(
     max_requests=120, window_seconds=60, scope="visit_plan"
+)
+rate_limit_observation = SlidingWindowRateLimiter(
+    max_requests=30, window_seconds=60, scope="observation"
 )

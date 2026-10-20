@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_admin
-from app.core.rate_limit import rate_limit_poll_service
+from app.core.rate_limit import rate_limit_observation, rate_limit_poll_service
 from app.db.session import get_db
 from app.domain.models import User
 from app.schemas.queue import (
@@ -76,6 +76,7 @@ async def get_queue_status(
     "/{service_id}/observations",
     response_model=WaitObservationResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_observation)],
 )
 async def submit_observation(
     service_id: uuid.UUID,
